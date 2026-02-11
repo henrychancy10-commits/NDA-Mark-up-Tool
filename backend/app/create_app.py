@@ -5,7 +5,7 @@ Flask application factory.
 import os
 
 from dotenv import load_dotenv
-from flask import Flask, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 
 from app.api.routes import api
@@ -54,6 +54,14 @@ def create_app():
         if path and os.path.exists(os.path.join(app.static_folder, path)):
             return send_from_directory(app.static_folder, path)
         # Otherwise serve index.html (React SPA handles routing)
+        return send_from_directory(app.static_folder, "index.html")
+
+    # Also handle 404s by serving the SPA (for client-side routes)
+    @app.errorhandler(404)
+    def not_found(e):
+        # Only serve index.html for non-API requests
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "Not found"}), 404
         return send_from_directory(app.static_folder, "index.html")
 
     # Initialize database
