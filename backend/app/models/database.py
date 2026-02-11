@@ -85,11 +85,29 @@ def init_db():
         CREATE TABLE IF NOT EXISTS training_examples (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             project_id INTEGER,
+            name TEXT,
+            original_filename TEXT NOT NULL,
             original_path TEXT NOT NULL,
-            marked_up_path TEXT,
-            final_path TEXT,
-            metadata_json TEXT,
+            negotiated_filename TEXT,
+            negotiated_path TEXT,
+            diffs_json TEXT,
+            summary_json TEXT,
+            status TEXT DEFAULT 'uploaded',
             notes TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (project_id) REFERENCES projects(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS training_patterns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            pattern_type TEXT NOT NULL,
+            description TEXT,
+            original_pattern TEXT,
+            replacement_pattern TEXT,
+            frequency INTEGER DEFAULT 1,
+            examples_json TEXT,
+            active INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (project_id) REFERENCES projects(id)
         );
@@ -277,3 +295,157 @@ def get_markup_result(doc_id: int) -> Optional[dict]:
         result["stats"] = json.loads(result["stats_json"]) if result["stats_json"] else {}
         return result
     return None
+
+
+# --- Training Examples CRUD ---
+
+
+def create_training_example(
+    project_id: int,
+    name: str,
+    original_filename: str,
+    original_path: str,
+    negotiated_filename: str = "",
+    negotiated_path: str = "",
+    notes: str = "",
+) -> int:
+    conn = get_db()
+    cursor = conn.execute(
+        """INSERT INTO training_examples
+           (project_id, name, original_filename, original_path,
+            negotiated_filename, negotiated_path, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (project_id, name, original_filename, original_path,
+         negotiated_filename, negotiated_path, notes),
+    )
+    conn.commit()
+    eid = cursor.lastrowid
+    conn.close()
+    return eid
+
+
+def update_training_example(
+    example_id: int,
+    negotiated_filename: str = None,
+    negotiated_path: str = None,
+    diffs_json: str = None,
+    summary_json: str = None,
+    status: str = None,
+):
+    conn = get_db()
+    updates = []
+    params = []
+    if negotiated_filename is not None:
+        updates.append("negotiated_filename = ?")
+        params.append(negotiated_filename)
+    if negotiated_path is not None:
+        updates.append("negotiated_path = ?")
+        params.append(negotiated_path)
+    if diffs_json is not None:
+        updates.append("diffs_json = ?")
+        params.append(diffs_json)
+    if summary_json is not None:
+        updates.append("summary_json = ?")
+        params.append(summary_json)
+    if status is not None:
+        updates.append("status = ?")
+        params.append(status)
+    if updates:
+        params.append(example_id)
+        conn.execute(
+            f"UPDATE training_examples SET {', '.join(updates)} WHERE id = ?",
+            params,
+        )
+        conn.commit()
+    conn.close()
+
+
+def get_training_example(example_id: int) -> Optional[dict]:
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM training_examples WHERE id = ?", (example_id,)
+    ).fetchone()
+    conn.close()
+    if row:
+        result = dict(row)
+        result["diffs"] = json.loads(result["diffs_json"]) if result.get("diffs_json") else []
+        result["summary"] = json.loads(result["summary_json"]) if result.get("summary_json") else {}
+        return result
+    return None
+
+
+def list_training_examples(project_id: int) -> list[dict]:
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM training_examples WHERE project_id = ? ORDER BY created_at DESC",
+        (project_id,),
+    ).fetchall()
+    conn.close()
+    results = []
+    for row in rows:
+        r = dict(row)
+        r["diffs"] = json.loads(r["diffs_json"]) if r.get("diffs_json") else []
+        r["summary"] = json.loads(r["summary_json"]) if r.get("summary_json") else {}
+        results.append(r)
+    return results
+
+
+def delete_training_example(example_id: int):
+    conn = get_db()
+    conn.execute("DELETE FROM training_examples WHERE id = ?", (example_id,))
+    conn.commit()
+    conn.close()
+
+
+# --- Training Patterns CRUD ---
+
+
+def save_training_patterns(project_id: int, patterns: list[dict]):
+    """Replace all patterns for a project with new ones."""
+    conn = get_db()
+    conn.execute("DELETE FROM training_patterns WHERE project_id = ?", (project_id,))
+    for p in patterns:
+        conn.execute(
+            """INSERT INTO training_patterns
+               (project_id, pattern_type, description, original_pattern,
+                replacement_pattern, frequency, examples_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                project_id,
+                p.get("pattern_type", ""),
+                p.get("description", ""),
+                p.get("original_pattern", ""),
+                p.get("replacement_pattern", ""),
+                p.get("frequency", 1),
+                json.dumps(p.get("examples", [])),
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+
+def get_training_patterns(project_id: int, active_only: bool = True) -> list[dict]:
+    conn = get_db()
+    query = "SELECT * FROM training_patterns WHERE project_id = ?"
+    params = [project_id]
+    if active_only:
+        query += " AND active = 1"
+    query += " ORDER BY frequency DESC"
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    results = []
+    for row in rows:
+        r = dict(row)
+        r["examples"] = json.loads(r["examples_json"]) if r.get("examples_json") else []
+        results.append(r)
+    return results
+
+
+def toggle_training_pattern(pattern_id: int, active: bool):
+    conn = get_db()
+    conn.execute(
+        "UPDATE training_patterns SET active = ? WHERE id = ?",
+        (1 if active else 0, pattern_id),
+    )
+    conn.commit()
+    conn.close()

@@ -14,17 +14,25 @@ from app.models.database import (
     create_document,
     create_guideline,
     create_project,
+    create_training_example,
+    delete_training_example,
     get_changes,
     get_document,
     get_guidelines_for_project,
     get_markup_result,
     get_project,
+    get_training_example,
+    get_training_patterns,
     list_documents,
     list_projects,
+    list_training_examples,
     save_changes,
     save_markup_result,
+    save_training_patterns,
+    toggle_training_pattern,
     update_change_status,
     update_document_status,
+    update_training_example,
 )
 from app.services.claude_analyzer import ClaudeAnalyzer
 from app.services.document_markup import (
@@ -34,6 +42,11 @@ from app.services.document_markup import (
     extract_document_text,
 )
 from app.services.guideline_parser import parse_guidelines
+from app.services.training import (
+    analyze_training_pair,
+    build_training_context,
+    extract_patterns_from_examples,
+)
 
 api = Blueprint("api", __name__, url_prefix="/api")
 
@@ -67,6 +80,7 @@ def _build_summary(changes: list, doc_text: str) -> dict:
 
 ALLOWED_DOC_EXTENSIONS = {".docx"}
 ALLOWED_GUIDELINE_EXTENSIONS = {".docx", ".doc", ".pdf", ".txt"}
+ALLOWED_TRAINING_EXTENSIONS = {".docx", ".pdf"}
 
 
 def _allowed_file(filename: str, allowed: set) -> bool:
@@ -105,6 +119,8 @@ def api_get_project(project_id):
         return jsonify({"error": "Project not found"}), 404
     project["documents"] = list_documents(project_id)
     project["guidelines"] = get_guidelines_for_project(project_id)
+    project["training_examples"] = list_training_examples(project_id)
+    project["training_patterns"] = get_training_patterns(project_id)
     return jsonify(project)
 
 
@@ -235,6 +251,23 @@ def api_analyze_document(doc_id):
         all_guidelines = "\n\n---\n\n".join(
             g["content_text"] for g in guidelines if g.get("content_text")
         )
+
+        # Include training patterns if available
+        patterns = get_training_patterns(project_id)
+        if patterns:
+            pattern_dicts = [
+                {
+                    "pattern_type": p["pattern_type"],
+                    "description": p["description"],
+                    "original_pattern": p["original_pattern"],
+                    "replacement_pattern": p["replacement_pattern"],
+                    "frequency": p["frequency"],
+                    "examples": p.get("examples", []),
+                }
+                for p in patterns
+            ]
+            training_context = build_training_context(pattern_dicts)
+            all_guidelines = all_guidelines + "\n\n" + training_context
 
         # Analyze with Claude
         analyzer = ClaudeAnalyzer()
@@ -480,3 +513,190 @@ def api_download_file(filename):
         as_attachment=True,
         mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
+
+
+# --- Training endpoints ---
+
+
+@api.route("/projects/<int:project_id>/training", methods=["GET"])
+def api_list_training(project_id):
+    """List all training examples and patterns for a project."""
+    project = get_project(project_id)
+    if not project:
+        return jsonify({"error": "Project not found"}), 404
+    examples = list_training_examples(project_id)
+    patterns = get_training_patterns(project_id)
+    return jsonify({"examples": examples, "patterns": patterns})
+
+
+@api.route("/projects/<int:project_id>/training/upload", methods=["POST"])
+def api_upload_training_pair(project_id):
+    """
+    Upload a training pair: clean NDA (.docx) + negotiated version (.docx or .pdf).
+    Both files can be uploaded together, or the negotiated version can be added later.
+    """
+    project = get_project(project_id)
+    if not project:
+        return jsonify({"error": "Project not found"}), 404
+
+    if "original" not in request.files:
+        return jsonify({"error": "Original NDA file is required"}), 400
+
+    original_file = request.files["original"]
+    if not original_file.filename:
+        return jsonify({"error": "No original file selected"}), 400
+
+    if not _allowed_file(original_file.filename, ALLOWED_DOC_EXTENSIONS):
+        return jsonify({"error": "Original NDA must be a .docx file"}), 400
+
+    upload_dir = current_app.config["UPLOAD_FOLDER"]
+    name = request.form.get("name", original_file.filename)
+    notes = request.form.get("notes", "")
+
+    # Save original
+    orig_filename = _unique_filename(original_file.filename)
+    orig_path = os.path.join(upload_dir, orig_filename)
+    original_file.save(orig_path)
+
+    neg_filename = ""
+    neg_path = ""
+
+    # Save negotiated if provided
+    if "negotiated" in request.files:
+        neg_file = request.files["negotiated"]
+        if neg_file.filename and _allowed_file(neg_file.filename, ALLOWED_TRAINING_EXTENSIONS):
+            neg_filename = _unique_filename(neg_file.filename)
+            neg_path = os.path.join(upload_dir, neg_filename)
+            neg_file.save(neg_path)
+
+    example_id = create_training_example(
+        project_id=project_id,
+        name=name,
+        original_filename=original_file.filename,
+        original_path=orig_path,
+        negotiated_filename=neg_file.filename if neg_path else "",
+        negotiated_path=neg_path,
+        notes=notes,
+    )
+
+    # If both files provided, immediately compute diffs
+    result = {"id": example_id, "status": "uploaded"}
+    if neg_path:
+        try:
+            analysis = analyze_training_pair(orig_path, neg_path, notes)
+            update_training_example(
+                example_id,
+                diffs_json=json.dumps(analysis["diffs"]),
+                summary_json=json.dumps(analysis["summary"]),
+                status="analyzed",
+            )
+            result["status"] = "analyzed"
+            result["summary"] = analysis["summary"]
+            result["diffs_count"] = len(analysis["diffs"])
+        except Exception as e:
+            update_training_example(example_id, status="error")
+            result["status"] = "error"
+            result["error"] = str(e)
+
+    return jsonify(result), 201
+
+
+@api.route("/training/<int:example_id>/negotiated", methods=["POST"])
+def api_upload_negotiated(example_id):
+    """Upload/replace the negotiated version for an existing training example."""
+    example = get_training_example(example_id)
+    if not example:
+        return jsonify({"error": "Training example not found"}), 404
+
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+
+    file = request.files["file"]
+    if not file.filename or not _allowed_file(file.filename, ALLOWED_TRAINING_EXTENSIONS):
+        return jsonify({"error": "File must be .docx or .pdf"}), 400
+
+    upload_dir = current_app.config["UPLOAD_FOLDER"]
+    filename = _unique_filename(file.filename)
+    filepath = os.path.join(upload_dir, filename)
+    file.save(filepath)
+
+    # Compute diffs
+    try:
+        analysis = analyze_training_pair(
+            example["original_path"], filepath, example.get("notes", "")
+        )
+        update_training_example(
+            example_id,
+            negotiated_filename=file.filename,
+            negotiated_path=filepath,
+            diffs_json=json.dumps(analysis["diffs"]),
+            summary_json=json.dumps(analysis["summary"]),
+            status="analyzed",
+        )
+        return jsonify({
+            "status": "analyzed",
+            "summary": analysis["summary"],
+            "diffs_count": len(analysis["diffs"]),
+        })
+    except Exception as e:
+        update_training_example(example_id, status="error")
+        return jsonify({"error": str(e)}), 500
+
+
+@api.route("/training/<int:example_id>", methods=["GET"])
+def api_get_training_example(example_id):
+    """Get a training example with its diffs."""
+    example = get_training_example(example_id)
+    if not example:
+        return jsonify({"error": "Training example not found"}), 404
+    return jsonify(example)
+
+
+@api.route("/training/<int:example_id>", methods=["DELETE"])
+def api_delete_training_example(example_id):
+    """Delete a training example."""
+    example = get_training_example(example_id)
+    if not example:
+        return jsonify({"error": "Training example not found"}), 404
+    delete_training_example(example_id)
+    return jsonify({"status": "deleted"})
+
+
+@api.route("/projects/<int:project_id>/training/extract-patterns", methods=["POST"])
+def api_extract_patterns(project_id):
+    """
+    Extract reusable patterns from all analyzed training examples in a project.
+    This is the "learn" step that consolidates examples into patterns.
+    """
+    project = get_project(project_id)
+    if not project:
+        return jsonify({"error": "Project not found"}), 404
+
+    examples = list_training_examples(project_id)
+    analyzed = [e for e in examples if e.get("status") == "analyzed" and e.get("diffs")]
+
+    if not analyzed:
+        return jsonify({"error": "No analyzed training examples found. Upload and analyze pairs first."}), 400
+
+    # Extract patterns across all examples
+    example_data = [{"diffs": e["diffs"]} for e in analyzed]
+    patterns = extract_patterns_from_examples(example_data)
+
+    # Save patterns to DB
+    save_training_patterns(project_id, patterns)
+
+    return jsonify({
+        "status": "extracted",
+        "patterns_count": len(patterns),
+        "patterns": patterns,
+        "from_examples": len(analyzed),
+    })
+
+
+@api.route("/training/patterns/<int:pattern_id>/toggle", methods=["POST"])
+def api_toggle_pattern(pattern_id):
+    """Enable or disable a training pattern."""
+    data = request.get_json() or {}
+    active = data.get("active", True)
+    toggle_training_pattern(pattern_id, active)
+    return jsonify({"status": "updated", "active": active})

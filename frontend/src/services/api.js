@@ -71,3 +71,52 @@ export async function generateMarkup(docId) {
 export function getDownloadUrl(docId) {
   return `${API_BASE}/documents/${docId}/download`;
 }
+
+// --- Training ---
+
+export async function getTraining(projectId) {
+  return request(`/projects/${projectId}/training`);
+}
+
+export async function uploadTrainingPair(projectId, originalFile, negotiatedFile, name = "", notes = "") {
+  const formData = new FormData();
+  formData.append("original", originalFile);
+  if (negotiatedFile) formData.append("negotiated", negotiatedFile);
+  if (name) formData.append("name", name);
+  if (notes) formData.append("notes", notes);
+  return request(`/projects/${projectId}/training/upload`, {
+    method: "POST",
+    body: formData,
+  });
+}
+
+export async function uploadNegotiated(exampleId, file) {
+  const formData = new FormData();
+  formData.append("file", file);
+  return request(`/training/${exampleId}/negotiated`, {
+    method: "POST",
+    body: formData,
+  });
+}
+
+export async function getTrainingExample(exampleId) {
+  return request(`/training/${exampleId}`);
+}
+
+export async function deleteTrainingExample(exampleId) {
+  return request(`/training/${exampleId}`, { method: "DELETE" });
+}
+
+export async function extractPatterns(projectId) {
+  return request(`/projects/${projectId}/training/extract-patterns`, {
+    method: "POST",
+  });
+}
+
+export async function togglePattern(patternId, active) {
+  return request(`/training/patterns/${patternId}/toggle`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ active }),
+  });
+}

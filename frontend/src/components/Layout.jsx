@@ -8,7 +8,11 @@ export default function Layout() {
           <Link to="/" className="text-xl font-bold text-gray-900">
             NDA Markup Tool
           </Link>
-          <span className="text-sm text-gray-500">Phase 1 MVP</span>
+          <div className="flex items-center gap-4">
+            <Link to="/" className="text-sm text-gray-600 hover:text-gray-900">
+              Projects
+            </Link>
+          </div>
         </div>
       </nav>
       <main className="max-w-7xl mx-auto px-6 py-8">

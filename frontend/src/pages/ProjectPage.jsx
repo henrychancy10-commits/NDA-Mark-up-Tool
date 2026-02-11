@@ -66,7 +66,15 @@ export default function ProjectPage() {
         >
           &larr; Back to projects
         </button>
-        <h1 className="text-2xl font-bold text-gray-900">{project.name}</h1>
+        <div className="flex items-center justify-between">
+          <h1 className="text-2xl font-bold text-gray-900">{project.name}</h1>
+          <button
+            onClick={() => navigate(`/projects/${projectId}/training`)}
+            className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 text-sm font-medium"
+          >
+            Training Mode
+          </button>
+        </div>
         {project.description && (
           <p className="text-gray-500 mt-1">{project.description}</p>
         )}
