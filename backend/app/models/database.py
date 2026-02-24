@@ -11,6 +11,11 @@ from typing import Optional
 
 DB_PATH = os.environ.get("DATABASE_PATH", "nda_markup.db")
 
+# Ensure the database directory exists (needed for Render persistent disk)
+_db_dir = os.path.dirname(os.path.abspath(DB_PATH))
+if _db_dir:
+    os.makedirs(_db_dir, exist_ok=True)
+
 
 def get_db():
     """Get a database connection."""

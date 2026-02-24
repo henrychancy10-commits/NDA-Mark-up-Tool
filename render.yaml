@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: nda-markup-tool
+    runtime: python
+    buildCommand: ./build.sh
+    startCommand: cd backend && gunicorn --bind 0.0.0.0:$PORT --workers 2 --timeout 120 "app.create_app:create_app()"
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: FLASK_SECRET_KEY
+        generateValue: true
+      - key: PYTHON_VERSION
+        value: 3.11.11
+      - key: NODE_VERSION
+        value: 22.12.0
+      - key: DATABASE_PATH
+        value: /opt/render/project/src/data/nda_markup.db
+      - key: UPLOAD_FOLDER
+        value: /opt/render/project/src/data/uploads
+      - key: OUTPUT_FOLDER
+        value: /opt/render/project/src/data/output
+    disk:
+      name: nda-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
+    healthCheckPath: /health
